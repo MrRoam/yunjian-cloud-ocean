@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#3974a5"><title>云间 · 看一会儿天空</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%234277a1'/%3E%3Cpath d='M18 43a10 10 0 010-20 14 14 0 0126-1 11 11 0 010 22H18' fill='white'/%3E%3C/svg%3E"><link rel="stylesheet" href="./sky.css"></head>
+<body>
+<canvas id="sky" tabindex="0" aria-label="一望无际的海洋与流云。点击吹动云朵，拖动环顾海天，滚轮调整视角，回车吹动中央的云。"></canvas>
+<div class="vignette" aria-hidden="true"></div>
+<header><h1>云间<span>.</span></h1><span id="day-label">午后</span></header>
+<div class="loading" id="loading"><span class="loading-dot"></span><p id="loading-text">天空将至</p></div>
+<footer><div class="sun-control"><label for="sun-height">太阳高度</label><span aria-hidden="true">落</span><input id="sun-height" type="range" min="-5" max="32" step="0.1" value="32" aria-valuetext="日光，太阳高度 32 度" disabled><span aria-hidden="true">升</span></div><div class="toolbar" aria-label="云景控制"><button id="new-sky" class="new-sky" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3c4 0 6 8 10 8h3m-3-3 3 3-3 3M4 16h3c1.8 0 3.1-1.6 4.4-3.6M14 8.6A5 5 0 0 1 17 8h3m-3-3 3 3-3 3"/></svg><span>换一片天空</span></button></div><p class="gesture" id="gesture">点一下，吹动云朵 · 拖动环顾海天</p></footer>
+<p id="error" role="alert" hidden></p>
+<script type="module" src="./src/experience.mjs"></script>
+</body></html>
