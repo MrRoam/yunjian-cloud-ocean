@@ -1,6 +1,7 @@
 import {createSkyNoise} from './sky-noise.mjs';
 import {createScene,SceneSequence} from './sky-scenes.mjs';
 import {skyRay,Gusts} from './sky-interaction.mjs';
+import {RenderBudget} from './sky-budget.mjs';
 const code=/* wgsl */`
 struct Params{ screen:vec4f, view:vec4f, light:vec4f, world:vec4f, previous:vec4f, shapeA:vec4f, climateA:vec4f, shapeB:vec4f, climateB:vec4f, gusts:array<vec4f,4> }
 @group(0) @binding(0) var<uniform> u:Params;
@@ -30,6 +31,7 @@ fn cloudAt(p0:vec3f,seed:f32,shape:vec4f,climate:vec4f,fine:bool)->f32{
  let bottom=1.25+(tex(p*.55+vec3f(seed)).y-.4)*.17;
  let h=(p0.y-bottom)/shape.y;
  let heightMask=smoothstep(0.0,.075,h)*(1.0-smoothstep(.22+cover*.23,.55+cover*.45,h));
+ if(heightMask<=0.0){return 0.0;}
  let warp=(tex(q*.67+vec3f(seed*.31)+vec3f(0,u.screen.w*.006,0)).yzw-vec3f(.5))*.10+sin(q.zxy*1.7+u.screen.w*.10)*.045;
  let n=tex(p*shape.x+warp+vec3f(seed,0,seed*.43));
  let billow=n.x*.80+n.y*.15+n.z*.05+.018;
@@ -46,6 +48,7 @@ fn cloudAt(p0:vec3f,seed:f32,shape:vec4f,climate:vec4f,fine:bool)->f32{
 }
 // 在世界空间弯曲云体；光照采样也经过相同变形。
 fn disturb(p:vec3f)->vec4f{
+ if(u.world.w<.5){return vec4f(p,1.0);}
  var shifted=p;var keep=1.0;
  let fromEye=p-vec3f(0,.10,0);
  for(var i=0;i<4;i++){
@@ -94,7 +97,7 @@ fn sky(ray:vec3f,solarDisk:bool)->vec3f{
  return mix(color,vec3f(.025,.038,.075)+color*.12,dusk);
 }
 fn highCloud(ray:vec3f,seed:f32,climate:vec4f)->f32{
- if(ray.y<.025){return 0.0;}
+ if(ray.y<.025||climate.z<.001){return 0.0;}
  let gust=disturb(vec3f(0,.10,0)+ray*(5.8/ray.y));
  let point=gust.xz+vec2f(u.screen.w*.025,0);
  let ca=cos(climate.w+.7);let sa=sin(climate.w+.7);
@@ -109,15 +112,19 @@ fn highCloud(ray:vec3f,seed:f32,climate:vec4f)->f32{
 }
 fn aces(c:vec3f)->vec3f{return clamp((c*(2.51*c+.03))/(c*(2.43*c+.59)+.14),vec3f(0),vec3f(1));}
 fn atmosphere(ray:vec3f,jitter:f32)->vec4f{
- let eye=vec3f(0,.10,0);var bg=sky(ray,false);let aerial=sky(ray,false);
- let high=mix(highCloud(ray,u.world.x,u.climateA),highCloud(ray,u.world.y,u.climateB),u.world.z);
+ let eye=vec3f(0,.10,0);let aerial=sky(ray,false);var bg=aerial;
+ var high=highCloud(ray,u.world.x,u.climateA);
+ if(u.world.z>=.001){high=mix(high,highCloud(ray,u.world.y,u.climateB),u.world.z);}
  let highColor=mix(vec3f(.86,.91,1.0),vec3f(1.05,.49,.26),u.light.w);
  bg=mix(bg,highColor*mix(.12,1.0,daylight()),high);
  var color=vec3f(0);var trans=1.0;
 
  if(ray.y>.015){
-   let start=1.05/ray.y;let end=min(3.7/ray.y,96.0);
-   let stride=max(.018,(end-start)/112.0);
+   let top=max(u.shapeA.y,u.shapeB.y)*.9775+1.352;
+   let ceiling=select(min(top,3.8),3.8,u.world.w>.5);
+   let start=1.05/ray.y;let end=min((ceiling-eye.y)/ray.y,96.0);
+   // 保留原有采样间距，只裁掉已知不含云的上层空间。
+   let stride=max(.018,(min(3.7/ray.y,96.0)-start)/112.0);
    var t=start+jitter*stride;
    let mu=dot(ray,u.light.xyz);let phase=max(hg(mu,.65),hg(mu,-.25));
    let sunColor=mix(vec3f(1.0,.97,.90),vec3f(1.0,.44,.17),u.light.w);
@@ -125,7 +132,8 @@ fn atmosphere(ray:vec3f,jitter:f32)->vec4f{
      if(t>end||trans<.006){break;}
      let p=eye+ray*t;let d=density(p,true);
      if(d>.002){
-       let tau=shadow(p,jitter);
+       var tau=0.0;
+       if(daylight()>0.0){tau=shadow(p,jitter);}
        let scatter=exp(-tau)+.48*exp(-tau*.22)+.13*exp(-tau*.08);
        let powder=1.0-exp(-d*4.0);
        let altitude=clamp((p.y-1.25)/2.55,0.0,1.0);
@@ -219,22 +227,26 @@ fn ocean(ray:vec3f,jitter:f32)->vec3f{
 `;
 
 export class SkyRenderer{
- static async create(canvas){
-  if(!navigator.gpu)throw new Error('请用开启硬件加速的新版 Chrome 或 Edge 打开。');
-  const adapter=await navigator.gpu.requestAdapter({powerPreference:'high-performance'});if(!adapter)throw new Error('暂时无法连接图形处理器，请检查浏览器硬件加速。');
-  const device=await adapter.requestDevice();const self=new SkyRenderer(device,canvas);
+ static async create(canvas,options={}){
+  const unavailable=()=>Object.assign(new Error('当前浏览器无法使用实时图形渲染。'),{code:'WEBGPU_UNAVAILABLE'});
+  if(!navigator.gpu)throw unavailable();
+  const adapter=await navigator.gpu.requestAdapter({powerPreference:'high-performance'});if(!adapter||adapter.info?.isFallbackAdapter)throw unavailable();
+  let device;try{device=await adapter.requestDevice();}catch{throw unavailable();}
+  const self=new SkyRenderer(device,canvas,options);
   self.noise=await createSkyNoise(device);
   const module=device.createShaderModule({code});const info=await module.getCompilationInfo();const errors=info.messages.filter(m=>m.type==='error');if(errors.length)throw new Error(errors.map(e=>`${e.lineNum}: ${e.message}`).join('\n'));
   self.pipeline=await device.createRenderPipelineAsync({layout:'auto',vertex:{module,entryPoint:'vs'},fragment:{module,entryPoint:'clouds',targets:[{format:'rgba16float'}]}});
   self.displayPipeline=await device.createRenderPipelineAsync({layout:'auto',vertex:{module,entryPoint:'vs'},fragment:{module,entryPoint:'display',targets:[{format:self.format}]}});
   self.resize();return self;
  }
- constructor(device,canvas){
+ constructor(device,canvas,options={}){
   this.device=device;this.canvas=canvas;this.context=canvas.getContext('webgpu');this.format=navigator.gpu.getPreferredCanvasFormat();this.context.configure({device,format:this.format,alphaMode:'opaque'});
   this.uniform=device.createBuffer({size:208,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
   this.repeat=device.createSampler({magFilter:'linear',minFilter:'linear',addressModeU:'repeat',addressModeV:'repeat',addressModeW:'repeat'});this.clamp=device.createSampler({magFilter:'linear',minFilter:'linear'});
   this.yaw=0;this.pitch=.12;this.fov=1.30;this.frame=0;this.sequence=new SceneSequence();this.scene=createScene(1);this.nextScene=this.scene;this.seed=this.scene.seed;this.nextSeed=this.seed;this.pendingSky=false;this.transition=0;this.sunset=0;this.targetSunset=0;this.dirty=12;this.textures=[];this.lastCamera='';
   this.gusts=new Gusts();
+  this.budget=new RenderBudget({...options,coarse:matchMedia('(pointer:coarse)').matches,maxDimension:device.limits.maxTextureDimension2D});
+  this.pending=null;
   let pointer=null;
   canvas.addEventListener('pointerdown',e=>{
    if(!e.isPrimary||e.button!==0||pointer)return;
@@ -266,8 +278,8 @@ export class SkyRenderer{
   this.canvas.dispatchEvent(new CustomEvent('sky-stir',{detail:{x,y}}));
  }
  resize(){
-  const width=this.canvas.clientWidth,height=this.canvas.clientHeight,scale=Math.min(devicePixelRatio,1.4,Math.sqrt(1050000/(width*height)));
-  const w=Math.max(1,Math.round(width*scale)),h=Math.max(1,Math.round(height*scale));
+  const width=this.canvas.clientWidth,height=this.canvas.clientHeight;
+  const [w,h]=this.budget.dimensions(width,height,devicePixelRatio);
   if(this.canvas.width===w&&this.canvas.height===h&&this.textures.length)return;
   for(const t of this.textures)t.destroy();this.canvas.width=w;this.canvas.height=h;
   this.textures=[0,1].map(()=>this.device.createTexture({size:[w,h],format:'rgba16float',usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING}));
@@ -276,7 +288,9 @@ export class SkyRenderer{
   this.frame=0;this.dirty=12;
  }
  newSky(){if(this.transition>0){this.pendingSky=true;return;}this.nextScene=this.sequence.next();this.nextSeed=this.nextScene.seed;this.transition=.0001;this.dirty=12;}
- async render(time,dt,paused){
+ async render(time,dt,paused,{waitForGPU=true}={}){
+  if(this.submissionError)throw this.submissionError;
+  if(this.pending){if(!waitForGPU)return false;await this.pending;}
   this.resize();
   const hadGust=this.gusts.active;this.gusts.advance(dt);if(hadGust)this.dirty=12;
   const changing=this.gusts.active||this.transition>0||Math.abs(this.sunset-this.targetSunset)>.0002;
@@ -289,11 +303,19 @@ export class SkyRenderer{
   const sun=[Math.sin(azimuth)*Math.cos(elev),Math.sin(elev),Math.cos(azimuth)*Math.cos(elev)];
   const camera=[this.yaw,this.pitch,this.fov].join(',');const reset=camera!==this.lastCamera||this.frame===0;this.lastCamera=camera;
   const blend=reset?1:paused&&!changing?.12:.20;
-  const data=new Float32Array([this.canvas.width,this.canvas.height,this.frame,time,this.yaw,this.pitch,this.fov,0,...sun,warmth,this.seed,this.nextSeed,this.transition,0,blend,0,0,0,...this.scene.shape,...this.scene.climate,...this.nextScene.shape,...this.nextScene.climate,...this.gusts.pack()]);
+  const data=new Float32Array([this.canvas.width,this.canvas.height,this.frame,time,this.yaw,this.pitch,this.fov,0,...sun,warmth,this.seed,this.nextSeed,this.transition,this.gusts.active?1:0,blend,0,0,0,...this.scene.shape,...this.scene.climate,...this.nextScene.shape,...this.nextScene.climate,...this.gusts.pack()]);
   this.device.queue.writeBuffer(this.uniform,0,data);
   const source=this.frame%2,dest=1-source,e=this.device.createCommandEncoder();
   const pass=e.beginRenderPass({colorAttachments:[{view:this.textures[dest].createView(),loadOp:'clear',storeOp:'store',clearValue:{r:0,g:0,b:0,a:1}}]});pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.groups[source]);pass.draw(3);pass.end();
   const display=e.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),loadOp:'clear',storeOp:'store',clearValue:{r:0,g:0,b:0,a:1}}]});display.setPipeline(this.displayPipeline);display.setBindGroup(0,this.displayGroups[dest]);display.draw(3);display.end();this.device.queue.submit([e.finish()]);
-  this.frame++;this.dirty--;await this.device.queue.onSubmittedWorkDone();
+  this.frame++;this.dirty--;
+  const started=performance.now();
+  this.pending=this.device.queue.onSubmittedWorkDone().then(()=>{
+   this.budget.record(performance.now()-started,performance.now());this.pending=null;
+  },error=>{
+   this.pending=null;this.submissionError=error;
+  });
+  if(waitForGPU){await this.pending;if(this.submissionError)throw this.submissionError;}
+  return true;
  }
 }

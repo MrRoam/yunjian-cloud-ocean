@@ -15,7 +15,7 @@ await page.evaluate(async()=>{
  const {SkyRenderer}=await import('/src/sky-renderer.mjs');
  const {createScene}=await import('/src/sky-scenes.mjs');
  window.makeScene=(kind,seed)=>{const s=createScene(kind);s.seed=seed;s.climate[3]=.6;return s;};
- window.r=await SkyRenderer.create(document.querySelector('canvas'));
+ window.r=await SkyRenderer.create(document.querySelector('canvas'),{adaptive:false});
  r.device.addEventListener('uncapturederror',e=>{throw e.error;});
 });
 const clips=[{name:'01-日光海风',kind:1,seed:17.2,duration:12},{name:'02-流云变幻',kind:3,seed:24.7,duration:16},{name:'03-海上日落',kind:1,seed:41.6,duration:18}];

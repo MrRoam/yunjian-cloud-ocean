@@ -37,8 +37,28 @@ fn main(@builtin(global_invocation_id) id:vec3u){
   textureStore(outTex,vec3i(id),vec4f(base,w8,w16,w32));
 }
 `;
-export async function createSkyNoise(device){
-  const texture=device.createTexture({label:'云形 · 三维 Perlin–Worley 多尺度纹理',size:[128,128,128],dimension:'3d',format:'rgba8unorm',usage:GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.TEXTURE_BINDING});
+export async function createSkyNoise(device,{precomputed=true}={}){
+  if(precomputed&&typeof DecompressionStream!=='undefined'){
+    try{
+      const response=await fetch(new URL('../assets/sky-noise-v1.bin.gz',import.meta.url));
+      if(!response.ok)throw new Error('云形纹理未载入');
+      const packed=new Uint8Array(await new Response(response.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
+      const voxels=128*128*128;
+      if(packed.byteLength!==voxels*4)throw new Error('云形纹理不完整');
+      const bytes=new Uint8Array(packed.length);
+      // 分通道差分后压缩，减少传输量；恢复后的每个字节与 GPU 生成版一致。
+      for(let channel=0;channel<4;channel++){
+        let value=0;const offset=channel*voxels;
+        for(let i=0;i<voxels;i++){value=(value+packed[offset+i])&255;bytes[i*4+channel]=value;}
+      }
+      const texture=device.createTexture({size:[128,128,128],dimension:'3d',format:'rgba8unorm',usage:GPUTextureUsage.COPY_DST|GPUTextureUsage.TEXTURE_BINDING});
+      device.queue.writeTexture({texture},bytes,{bytesPerRow:512,rowsPerImage:128},[128,128,128]);
+      return texture;
+    }catch{
+      // 离线或资源不可用时，使用同一算法在本机生成。
+    }
+  }
+  const texture=device.createTexture({label:'云形 · 三维 Perlin–Worley 多尺度纹理',size:[128,128,128],dimension:'3d',format:'rgba8unorm',usage:GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_SRC});
   const module=device.createShaderModule({code});
   const info=await module.getCompilationInfo();
   const errors=info.messages.filter(m=>m.type==='error');if(errors.length)throw new Error(errors.map(e=>e.message).join('\n'));
